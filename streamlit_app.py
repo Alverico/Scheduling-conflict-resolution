@@ -1,196 +1,113 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+import os
+from streamlit_lottie import st_lottie
+import json
+from io import BytesIO
 
-# --- Page Setup ---
-st.set_page_config(page_title="📘 PCCOE ENTC Timetable Formulator", layout="wide")
-
-# --- Theme Toggle ---
-theme = st.sidebar.radio("🎨 Choose Theme", ["Light", "Dark"])
-
-if theme == "Dark":
-    st.markdown("""
-        <style>
-        body { background-color: #0e1117; color: #fafafa; }
-        .stApp { background-color: #0e1117; }
-        .block-container { padding-top: 2rem; }
-        .stDataFrame { background-color: #1f222a; color: #fafafa; }
-        </style>
-    """, unsafe_allow_html=True)
-else:
-    st.markdown("""
-        <style>
-        .block-container { padding-top: 2rem; }
-        </style>
-    """, unsafe_allow_html=True)
-
-# --- Animated Conflict Highlighting CSS ---
-st.markdown("""
-    <style>
-    .conflict-highlight {
-        animation: flash 1s infinite;
-        background-color: #ffe4e1 !important;
-    }
-    @keyframes flash {
-        0%   { background-color: #ffe4e1; }
-        50%  { background-color: #ffcccc; }
-        100% { background-color: #ffe4e1; }
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- Header ---
-col1, col2 = st.columns([1, 8])
-with col1:
-    st.image("PCCOE-Logo-24-removebg-preview.png", width=90)
-with col2:
-    st.markdown("## ✨ PCCOE ENTC Timetable Formulator")
-    st.markdown("#### _Plan Smart · Detect Conflicts · Form Perfect Batches_")
-
-# --- Sidebar Upload Section ---
-with st.sidebar:
-    st.header("📂 Upload Files")
-    subject_file = st.file_uploader("📘 Subject Allocation File", type=["xlsx"])
-    timetable_file = st.file_uploader("⏰ Timetable File", type=["xlsx"])
-    st.markdown("💡 *Upload both files to proceed.*")
-
-# --- Helper: Parse time strings ---
-def parse_time(time_str):
+# ------------------ LOTTIE ANIMATIONS ------------------ #
+def load_lottie_file(filepath):
     try:
-        return datetime.strptime(str(time_str), "%H:%M").time()
-    except:
-        return datetime.strptime(str(time_str), "%H:%M:%S").time()
+        with open(filepath, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        st.warning(f"Animation file not found: {filepath}")
+        return None
 
-# --- Conflict Detection ---
-def detect_conflicts(subject_df, timetable_df):
-    merged_df = pd.merge(subject_df, timetable_df, on="Subject Code", how="left")
-    merged_df['Start Time'] = merged_df['Start Time'].apply(parse_time)
-    merged_df['End Time'] = merged_df['End Time'].apply(parse_time)
+def show_lottie_animation(path, height=300):
+    lottie = load_lottie_file(path)
+    if lottie:
+        st_lottie(lottie, height=height)
+    else:
+        st.error("❌ Failed to load animation.")
 
-    conflicts = []
-    grouped = merged_df.groupby("Student Roll No")
-    for roll_no, group in grouped:
-        group = group.sort_values(by=["Day", "Start Time"])
-        for i in range(len(group)):
-            for j in range(i + 1, len(group)):
-                row1 = group.iloc[i]
-                row2 = group.iloc[j]
-                if row1['Day'] != row2['Day']:
-                    continue
-                overlap = (
-                    row1['Start Time'] < row2['End Time'] and
-                    row2['Start Time'] < row1['End Time']
-                )
-                if overlap:
-                    conflicts.append({
-                        "Student Roll No": roll_no,
-                        "Subject 1": row1['Subject Code'],
-                        "Subject 2": row2['Subject Code'],
-                        "Day": row1['Day'],
-                        "Time 1": f"{row1['Start Time']} - {row1['End Time']}",
-                        "Time 2": f"{row2['Start Time']} - {row2['End Time']}"
-                    })
-    return pd.DataFrame(conflicts)
+# ------------------ FILE PROCESSING ------------------ #
+def process_uploaded_file(uploaded_file):
+    try:
+        file_extension = uploaded_file.name.split('.')[-1].lower()
 
-# --- Suggest Resolutions ---
-def suggest_resolutions(conflict_df, timetable_df):
-    suggestions = []
-    for _, row in conflict_df.iterrows():
-        subj_to_reschedule = row["Subject 2"]
-        day_of_conflict = row["Day"]
-
-        alt_slots = timetable_df[
-            (timetable_df["Subject Code"] == subj_to_reschedule) &
-            (timetable_df["Day"] != day_of_conflict)
-        ]
-
-        if not alt_slots.empty:
-            first_alt = alt_slots.iloc[0]
-            suggestions.append({
-                **row,
-                "Suggested New Day": first_alt['Day'],
-                "Suggested New Time": f"{first_alt['Start Time']} - {first_alt['End Time']}"
-            })
+        if file_extension == 'csv':
+            df = pd.read_csv(uploaded_file)
+        elif file_extension in ['xls', 'xlsx']:
+            raw_df = pd.read_excel(uploaded_file, header=None)
+            header_row = None
+            for i in range(min(15, len(raw_df))):
+                row = raw_df.iloc[i].astype(str).str.lower()
+                if row.str.contains("roll no|registration number|reg no|roll number").any():
+                    header_row = i
+                    break
+            if header_row is not None:
+                df = pd.read_excel(uploaded_file, header=header_row)
+            else:
+                st.error("Could not detect a proper header row containing a roll number identifier. Please check the file.")
+                return None
         else:
-            suggestions.append({
-                **row,
-                "Suggested New Day": "None",
-                "Suggested New Time": "No alternative slot"
-            })
-    return pd.DataFrame(suggestions)
+            st.error("Unsupported file format. Please upload a .csv or .xlsx file.")
+            return None
 
-# --- Batch Formation ---
-def form_batches(subject_df, batch_size=30):
-    subject_batches = []
-    grouped = subject_df.groupby('Subject Code')
+        df.columns = [str(col).strip().lower() for col in df.columns]
 
-    for subject, group in grouped:
-        students = group['Student Roll No'].tolist()
-        num_batches = (len(students) + batch_size - 1) // batch_size
+        roll_column_candidates = ['roll no', 'roll number', 'registration number', 'reg no']
+        matched_col = next((col for col in df.columns if col in roll_column_candidates), None)
 
-        for i in range(num_batches):
-            batch_students = students[i * batch_size : (i + 1) * batch_size]
-            for roll in batch_students:
-                subject_batches.append({
-                    'Subject Code': subject,
-                    'Batch No': f"{subject}_B{i+1}",
-                    'Student Roll No': roll
-                })
+        if not matched_col:
+            st.error(f"The uploaded file must contain a 'Roll No' or equivalent column. Columns found: {df.columns.tolist()}")
+            return None
 
-    return pd.DataFrame(subject_batches)
+        df.rename(columns={matched_col: 'roll no'}, inplace=True)
 
-# --- Main Logic ---
-if subject_file and timetable_file:
-    subject_df = pd.read_excel(subject_file)
-    timetable_df = pd.read_excel(timetable_file)
+        return df
+    except Exception as e:
+        st.error(f"Error processing {uploaded_file.name}: {e}")
+        return None
 
-    tab1, tab2 = st.tabs(["🧠 Conflict Detection", "👥 Batch Formation"])
+# ------------------ BATCH FORMATION ------------------ #
+def form_batches_by_subject(uploaded_files, batch_size):
+    subject_batches = {}
 
-    with tab1:
-        with st.expander("📄 Uploaded Data Preview", expanded=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**📘 Subject Allocation**")
-                st.dataframe(subject_df, use_container_width=True)
-            with col2:
-                st.markdown("**⏰ Timetable Data**")
-                st.dataframe(timetable_df, use_container_width=True)
+    for file in uploaded_files:
+        subject_name = os.path.splitext(file.name)[0].upper()
+        df = process_uploaded_file(file)
+        if df is not None:
+            df = df[['division', 'roll no', 'student name']]
+            df = df.reset_index(drop=True)
+            df['Batch'] = [f"{subject_name}{(i // batch_size) + 1}" for i in range(len(df))]
+            subject_batches[subject_name] = df
 
-        st.subheader("🚨 Detected Conflicts")
-        conflict_df = detect_conflicts(subject_df, timetable_df)
+    return subject_batches
 
-        if not conflict_df.empty:
-            st.warning(f"⚠️ {len(conflict_df)} conflicts found!")
-            
-            # 🎞️ Animate rows by highlighting via HTML table
-            styled_conflicts = conflict_df.to_html(classes="conflict-highlight", index=False, escape=False)
-            st.markdown(styled_conflicts, unsafe_allow_html=True)
+# ------------------ MAIN STREAMLIT APP ------------------ #
+st.set_page_config(page_title="PCCOE ENTC Timetable Formulator", layout="centered")
+st.title("\U0001F4D8 PCCOE ENTC Timetable Formulator")
 
-            st.subheader("🛠 Suggested Resolutions")
-            resolved_df = suggest_resolutions(conflict_df, timetable_df)
-            st.dataframe(resolved_df, use_container_width=True)
+st.sidebar.header("\U0001F39E️ Animations")
+if st.sidebar.checkbox("Show Batch Formation Animation"):
+    show_lottie_animation("animations/batch.json")
+if st.sidebar.checkbox("Show Timetable Animation"):
+    show_lottie_animation("animations/timetable.json")
+if st.sidebar.checkbox("Show Conflict Resolution Animation"):
+    show_lottie_animation("animations/conflict.json")
 
+st.markdown("### Step 1: Upload Subject Allocation Files")
+uploaded_files = st.file_uploader(
+    "Upload multiple subject allocation files (.csv/.xlsx)",
+    type=["csv", "xls", "xlsx"],
+    accept_multiple_files=True
+)
+
+if uploaded_files:
+    st.markdown("### Step 2: Forming Batches")
+    batch_size = st.number_input("Enter batch size", min_value=5, max_value=100, value=20, step=5)
+    if st.button("Generate Batches"):
+        subject_batches = form_batches_by_subject(uploaded_files, batch_size)
+
+        for subject, df in subject_batches.items():
+            st.markdown(f"#### Batches for {subject}")
+            st.dataframe(df)
+            csv = df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                "📥 Download Conflict Resolution Report",
-                resolved_df.to_csv(index=False),
-                file_name="conflict_resolutions.csv",
-                mime="text/csv"
+                label=f"Download {subject} Batches as CSV",
+                data=csv,
+                file_name=f"{subject}_batches.csv",
+                mime='text/csv'
             )
-        else:
-            st.success("✅ No conflicts found!")
-
-    with tab2:
-        st.subheader("👥 Generate Student Batches")
-        batch_size = st.slider("🎯 Select Batch Size", min_value=5, max_value=100, value=30, step=5)
-        batch_df = form_batches(subject_df, batch_size)
-
-        st.dataframe(batch_df, use_container_width=True)
-
-        st.download_button(
-            "📥 Download Batch Allocation",
-            batch_df.to_csv(index=False),
-            file_name="batch_allocation.csv",
-            mime="text/csv"
-        )
-else:
-    st.info("👈 Please upload both Subject Allocation and Timetable files to get started.")
